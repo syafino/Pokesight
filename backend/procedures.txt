@@ -1,0 +1,125 @@
+THESE ARE THE STORED PROCEDURES + TRANSACTIONS
+
+////////CREATING SIGHTING PROCEDURE
+
+DROP PROCEDURE IF EXISTS CreateSightingWithReport;
+
+DELIMITER //
+CREATE PROCEDURE CreateSightingWithReport(
+    IN p_sightingId VARCHAR(255),
+    IN p_pokemon_id INT,
+    IN p_longitude DECIMAL(10,6),
+    IN p_latitude DECIMAL(10,6),
+    IN p_appearedTimeOfDay VARCHAR(50),
+    IN p_weather VARCHAR(50),
+    IN p_temperature DECIMAL(5,2),
+    IN p_windSpeed DECIMAL(5,2),
+    IN p_userId VARCHAR(255),
+    IN p_notes TEXT,
+    OUT p_reportId INT
+)
+BEGIN
+    DECLARE v_similar_sightings INT DEFAULT 0;
+
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+    START TRANSACTION;
+
+    SELECT COUNT(*)
+    INTO v_similar_sightings
+    FROM Sighting s
+    JOIN Pokemon p ON s.pokemon_id = p.pokemon_id
+    JOIN Reports r ON s.sightingId = r.sightingId
+    WHERE p.pokemon_id = p_pokemon_id AND r.userId = p_userId
+    GROUP BY p.pokemon_id;
+
+    INSERT INTO Location (longitude, latitude, city, population_density, closeToWater)
+    SELECT p_longitude, p_latitude, 'Unknown', 0, FALSE
+    FROM DUAL
+    WHERE NOT EXISTS (
+        SELECT 1 
+        FROM Location l
+        JOIN Sighting s ON l.longitude = s.longitude AND l.latitude = s.latitude
+        JOIN Pokemon p ON s.pokemon_id = p.pokemon_id
+        WHERE l.longitude = p_longitude AND l.latitude = p_latitude
+        GROUP BY l.longitude, l.latitude
+    );
+
+    INSERT INTO Sighting (sightingId, pokemon_id, longitude, latitude, appearedTimeOfDay, weather, temperature, windSpeed)
+    VALUES (p_sightingId, p_pokemon_id, p_longitude, p_latitude, p_appearedTimeOfDay, p_weather, p_temperature, p_windSpeed);
+
+    INSERT INTO Reports (sightingId, userId, status, notes, time)
+    VALUES (p_sightingId, p_userId, 'confirmed', p_notes, NOW());
+
+    SET p_reportId = LAST_INSERT_ID();
+
+    COMMIT;
+END //
+DELIMITER ;
+
+
+
+
+
+
+//////// DELETING SIGHTING PROCEDURE
+
+DROP PROCEDURE IF EXISTS DeleteSightingWithCleanup;
+
+DELIMITER //
+CREATE PROCEDURE DeleteSightingWithCleanup(
+    IN p_sightingId VARCHAR(255),
+    IN p_userId VARCHAR(255),
+    OUT p_success BOOLEAN,
+    OUT p_message VARCHAR(255)
+)
+BEGIN
+    DECLARE v_report_count INT DEFAULT 0;
+    DECLARE v_pokemon_name VARCHAR(255);
+    
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        SET p_success = FALSE;
+        SET p_message = 'Database error occurred';
+    END;
+    
+    SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+    START TRANSACTION;
+    
+    SELECT p.pokemon_name, COUNT(r.reportId) 
+    INTO v_pokemon_name, v_report_count
+    FROM Reports r
+    JOIN Sighting s ON r.sightingId = s.sightingId
+    JOIN Pokemon p ON s.pokemon_id = p.pokemon_id
+    WHERE r.sightingId = p_sightingId AND r.userId = p_userId
+    GROUP BY p.pokemon_name;
+    
+    IF v_report_count = 0 THEN
+        SET p_success = FALSE;
+        SET p_message = 'You can only delete your own sighting reports';
+        ROLLBACK;
+    ELSE
+        DELETE FROM Reports WHERE sightingId = p_sightingId AND userId = p_userId;
+        
+        DELETE FROM Sighting 
+        WHERE sightingId = p_sightingId 
+          AND sightingId NOT IN (
+              SELECT r.sightingId 
+              FROM Reports r
+              JOIN Sighting s ON r.sightingId = s.sightingId
+              GROUP BY r.sightingId
+              HAVING COUNT(r.reportId) > 0
+          );
+        
+        SET p_success = TRUE;
+        SET p_message = CONCAT(v_pokemon_name, ' sighting deleted');
+        COMMIT;
+    END IF;
+END //
+DELIMITER ;
